@@ -1,0 +1,61 @@
+# =========================
+# Python / Django Core
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+celerybeat-schedule
+celerybeat.pid
+
+# =========================
+# Database
+# =========================
+# Do not commit your local SQLite database to GitHub!
+db.sqlite3
+db.sqlite3-journal
+
+# =========================
+# Secrets & Environments
+# =========================
+# NEVER commit your M-Pesa API keys or Django Secret Key!
+.env
+.env.local
+.env.development
+.env.production
+.venv
+venv/
+env/
+ENV/
+
+# =========================
+# Media & Static Files
+# =========================
+# Ignore user-uploaded files and collected static files
+/media/
+/staticfiles/
+/static_collected/
+
+# =========================
+# IDEs & Editors
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =========================
+# OS Generated Files
+# =========================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# =========================
+# Logs
+# =========================
+*.log
