@@ -1,4 +1,5 @@
 from django.db import models
+from django.utils.text import slugify
 import uuid
 
 # Create your models here.
@@ -7,11 +8,17 @@ class Event(models.Model):
     name = models.CharField(max_length=255)
     description = models.TextField()
     # date = models.DateTimeField()
+    slug = models.SlugField(max_length=255, unique=True, null=True, blank=True)
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     stream_link = models.URLField(blank=True, null=True, help_text="The hidden Live or stream URL")
 
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = slugify(self.name)
+        super().save(*args, **kwargs)
 
     def __str__(self):
         status = "🟢 LIVE" if self.is_active else "🔴 ENDED"
