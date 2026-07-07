@@ -1,20 +1,40 @@
 import base64
 import requests
 from datetime import datetime
+from django.db.models import Sum, Count
 from django.shortcuts import get_object_or_404
 from django.conf import settings
 from .models import Event, Ticket, Payment
 from .serializers import EventSerializer, TicketSerializer, PaymentSerializer
 from rest_framework import viewsets, status
+from rest_framework.permissions import BasePermission, SAFE_METHODS, IsAdminUser
 from rest_framework.response import Response
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, permission_classes, action
 
 # Create your views here.
+
+class IsAdminOrReadOnly(BasePermission):
+    def has_permission(self, request, view):
+        if request.method in SAFE_METHODS:
+            return True
+        return bool(request.user and request.user.is_staff)
 
 class EventViewSet(viewsets.ModelViewSet):
     queryset = Event.objects.all()
     serializer_class = EventSerializer
     lookup_field = 'slug'
+    permission_classes = [IsAdminOrReadOnly]
+
+    def get_queryset(self):
+        return Event.objects.filter(is_approved=True).order_by('-created_at')
+    
+    @action(detail=True, methods=['post'], permission_classes=[IsAdminUser])
+    def end_broadcast(self, request, slug=None):
+        """Dedicated, secure endpoint to terminate an event."""
+        event = self.get_object()
+        event.is_active = False
+        event.save()
+        return Response({"message": f"Broadcast ended successfully."}, status=status.HTTP_200_OK)
 
 class TicketViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Ticket.objects.all()
@@ -33,7 +53,7 @@ def get_mpesa_access_token():
         access_token = r.json()['access_token']
         return access_token
     
-    error_msg = f"Failed to get M-Pesa token. Daraja Response: {r.text}"
+    # error_msg = f"Failed to get M-Pesa token. Daraja Response: {r.text}"
     # print(f"--- DEBUG ERROR: {error_msg} ---")
     raise Exception("Failed to get M-Pesa access token")
 
@@ -170,9 +190,23 @@ def check_payment_status(request, checkout_request_id):
 
     return Response(response_data, status=status.HTTP_200_OK)
 
+# def get_client_ip(request):
+#     """Helper function to get the real IP address from the request."""
+#     x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+#     if x_forwarded_for:
+#         ip = x_forwarded_for.split(',')[0].strip()
+#     else:
+#         ip = request.META.get('REMOTE_ADDR')
+#     return ip
+
 @api_view(['GET'])
 def validate_ticket(request, ticket_id):
     """Frontend calls this when a user tries to load the stream page."""
+    device_id = request.headers.get('X-Device-ID')
+
+    if not device_id:
+        return Response({"error": "Device ID is missing from request."}, status=status.HTTP_400_BAD_REQUEST)
+
     try:
         ticket = Ticket.objects.get(id=ticket_id)
     except Ticket.DoesNotExist:
@@ -180,9 +214,77 @@ def validate_ticket(request, ticket_id):
 
     if not ticket.event.is_active:
         return Response({"error": "This live event has ended."}, status=status.HTTP_403_FORBIDDEN)
+    
+    MAX_DEVICES = 2
+    # client_ip = get_client_ip(request)
+
+    if device_id not in ticket.allowed_device_ids:
+        if len(ticket.allowed_device_ids) >= MAX_DEVICES:
+            return Response({
+                "error": f"Device limit reached. This link is already in use on {MAX_DEVICES} devices."
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        ticket.allowed_device_ids.append(device_id)
+        ticket.save()
 
     return Response({
         "message": "Access granted",
         "event_name": ticket.event.name,
         "stream_link": ticket.event.stream_link
     }, status=status.HTTP_200_OK)
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_dashboard_metrics(request):
+    """Returns platform-wide totals and the list of events for the dashboard."""
+    # 1. Calculate Global Totals
+    successful_payments = Payment.objects.filter(mpesa_payment_status='successful')
+    total_revenue = successful_payments.aggregate(Sum('amount'))['amount__sum'] or 0
+    total_tickets = Ticket.objects.count()
+    active_streams = Event.objects.filter(is_active=True).count()
+
+    # 2. Fetch all events with their individual performance
+    events_data = []
+    events = Event.objects.all().order_by('-created_at')
+    
+    for event in events:
+        event_payments = successful_payments.filter(event=event)
+        event_revenue = event_payments.aggregate(Sum('amount'))['amount__sum'] or 0
+        event_tickets = Ticket.objects.filter(event=event).count()
+        
+        events_data.append({
+            "id": event.id,
+            "name": event.name,
+            "slug": event.slug,
+            "price": event.price,
+            "is_active": event.is_active,
+            "created_at": event.created_at,
+            "revenue": event_revenue,
+            "tickets_sold": event_tickets,
+        })
+
+    return Response({
+        "metrics": {
+            "total_revenue": total_revenue,
+            "total_tickets": total_tickets,
+            "active_streams": active_streams
+        },
+        "events": events_data
+    }, status=status.HTTP_200_OK)
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_attendees_list(request):
+    """Returns a list of all successful buyers for the Attendees tab."""
+    payments = Payment.objects.filter(mpesa_payment_status='successful').select_related('event').order_by('-id')
+    
+    attendees = [{
+        "id": p.id,
+        "phone_number": p.phone_number,
+        "event_name": p.event.name,
+        "amount": p.amount,
+        "receipt": p.mpesa_receipt_number,
+        "date": p.ticket.created_at if p.ticket else None
+    } for p in payments]
+
+    return Response(attendees, status=status.HTTP_200_OK)

@@ -7,10 +7,11 @@ import uuid
 class Event(models.Model):
     name = models.CharField(max_length=255)
     description = models.TextField()
-    # date = models.DateTimeField()
+    date = models.DateTimeField()
     slug = models.SlugField(max_length=255, unique=True, null=True, blank=True)
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     stream_link = models.URLField(blank=True, null=True, help_text="The hidden Live or stream URL")
+    is_approved = models.BooleanField(default=False, help_text="Designates whether this event is visible to the public.")
 
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -30,6 +31,7 @@ class Ticket(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name='access_tokens')
     created_at = models.DateTimeField(auto_now_add=True)
+    allowed_device_ids = models.JSONField(default=list, blank=True)
 
     def __str__(self):
         return f"Access Token - {self.id}"

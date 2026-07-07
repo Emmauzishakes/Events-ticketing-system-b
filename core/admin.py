@@ -2,7 +2,13 @@ from django.contrib import admin
 from .models import Event, Ticket, Payment
 
 # Register your models here.
-admin.site.register(Event)
+@admin.register(Event)
+class EventAdmin(admin.ModelAdmin):
+    list_display = ('id', 'name', 'is_approved', 'is_active', 'created_at', 'price')
+    list_filter = ('is_approved', 'created_at', 'is_active')
+    list_editable = ('is_approved', 'is_active')
+    search_fields = ('name', 'description')
+    ordering = ('-created_at',)
 
 @admin.register(Ticket)
 class TicketAdmin(admin.ModelAdmin):

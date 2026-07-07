@@ -33,11 +33,13 @@ DEBUG = os.environ.get('DEBUG', 'False').lower() == 'true'
 
 # if not DEBUG:
 SECURE_SSL_REDIRECT = False
+SESSION_COOKIE_HTTPONLY = True
+CSRF_COOKIE_HTTPONLY = False
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True
 # SESSION_COOKIE_DOMAIN = '.caremaxmeds.co.ke'
 CSRF_COOKIE_SAMESITE = 'Lax'
-SESSION_COOKIE_SAMESITE = 'None'
+SESSION_COOKIE_SAMESITE = 'Lax'
 
 
 allowed_hosts_env = os.environ.get('ALLOWED_HOSTS', '')
@@ -54,7 +56,11 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+
+    'accounts',
     'core',
+
+    'axes',
     'corsheaders',
     'django_filters',
     'rest_framework',
@@ -70,6 +76,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'axes.middleware.AxesMiddleware',
 ]
 
 ROOT_URLCONF = 'ticketing_system.urls'
@@ -98,10 +105,17 @@ ASGI_APPLICATION = 'ticketing_system.asgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
+# DATABASES = {
+#     'default': dj_database_url.config(
+#         default=os.environ.get('DATABASE_URL')
+#     )
+# }
+
 DATABASES = {
-    'default': dj_database_url.config(
-        default=os.environ.get('DATABASE_URL')
-    )
+    'default': {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'db.sqlite3',
+    }
 }
 
 CORS_ORIGIN_ALLOW_ALL = False
@@ -139,6 +153,20 @@ REST_FRAMEWORK = {
         'rest_framework.filters.OrderingFilter',
     ]
 }
+
+AUTHENTICATION_BACKENDS = [
+    'axes.backends.AxesBackend',
+    'django.contrib.auth.backends.ModelBackend',
+]
+
+# --- AXES BRUTE-FORCE PROTECTION ---
+AXES_FAILURE_LIMIT = 5              # Lock out after 5 failed attempts
+AXES_COOLOFF_TIME = 1               # Lock out lasts for 1 hour
+AXES_LOCKOUT_PARAMETERS = ["ip_address", "username"] # Track both IP and the username they tried
+AXES_META_PREPEND_X_FORWARDED_FOR = True
+
+# When a lockout happens, call this custom function to return a JSON error to Next.js
+AXES_LOCKOUT_CALLABLE = 'accounts.views.locked_out_api_response'
 
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST = 'smtp.gmail.com'
