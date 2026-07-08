@@ -95,6 +95,7 @@ from django.contrib.auth.signals import user_login_failed
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.http import JsonResponse
 from django.core.exceptions import PermissionDenied
+from django.middleware.csrf import get_token
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -112,7 +113,8 @@ def locked_out_api_response(request, *args, **kwargs):
 @api_view(['GET'])
 @ensure_csrf_cookie
 def get_csrf_token(request):
-    return Response({"message": "CSRF cookie set"})
+    token = get_token(request)
+    return Response({"message": "CSRF cookie set", "csrfToken": token})
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -138,7 +140,8 @@ def admin_login(request):
         return Response({
             "message": "Admin login successful",
             "username": user.username,
-            "is_admin": True
+            "is_admin": True,
+            "csrfToken": get_token(request)
         }, status=status.HTTP_200_OK)
     
     user_login_failed.send(
