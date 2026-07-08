@@ -1,4 +1,5 @@
 import base64
+from os import stat
 import requests
 from datetime import datetime
 from django.db.models import Sum, Count
@@ -7,9 +8,10 @@ from django.conf import settings
 from .models import Event, Ticket, Payment
 from .serializers import EventSerializer, TicketSerializer, PaymentSerializer
 from rest_framework import viewsets, status
-from rest_framework.permissions import BasePermission, SAFE_METHODS, IsAdminUser
+from rest_framework.permissions import BasePermission, SAFE_METHODS, IsAdminUser, AllowAny
 from rest_framework.response import Response
-from rest_framework.decorators import api_view, permission_classes, action
+from rest_framework.decorators import api_view, permission_classes, action, throttle_classes
+from rest_framework.throttling import AnonRateThrottle
 
 # Create your views here.
 
@@ -288,3 +290,31 @@ def admin_attendees_list(request):
     } for p in payments]
 
     return Response(attendees, status=status.HTTP_200_OK)
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+@throttle_classes([AnonRateThrottle])
+def verify_mpesa_receipt(request):
+    """Allows users to retrieve their watch link using their M-Pesa receipt and phone Number."""
+    receipt = request.data.get('receipt_number')
+    phone = request.data.get('phone_number')
+
+    if not receipt or not phone:
+        return Response({"error": "Both receipt number and phone number are required."}, status=status.HTTP_400_BAD_REQUEST)
+    
+    try:
+        receipt = receipt.strip().upper()
+        phone = format_phone_number(phone)
+        payment = Payment.objects.get(mpesa_receipt_number=receipt, phone_number=phone, mpesa_payment_status='successful')
+        if not hasattr(payment, 'ticket') or not payment.ticket:
+            return Response(
+                {"error": "Payment received, but ticket is still generating. Please try again in 30 seconds."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        return Response({
+            "message": "Ticket retrieved successfully",
+            "ticket_id": str(payment.ticket.id),
+            "event_name": payment.event.name
+        }, status=status.HTTP_200_OK)
+    except Payment.DoesNotExist:
+        return Response({"error": "Invalid details. The receipt and phone number combination was not found."}, status=status.HTTP_404_NOT_FOUND)
