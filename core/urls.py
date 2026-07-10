@@ -16,6 +16,7 @@ urlpatterns = [
     path('payment-status/<str:checkout_request_id>/', views.check_payment_status, name='payment-status'),
     path('validate-ticket/<uuid:ticket_id>/', views.validate_ticket, name='validate-ticket'),
     path('verify-receipt/', views.verify_mpesa_receipt, name='verify_receipt'),
+    path('track-view/<slug:slug>/', views.track_stream_view, name='track_view'),
 
     path('admin/metrics/', views.admin_dashboard_metrics, name='admin-dashboard-metrics'),
     path('admin/attendees/', views.admin_attendees_list, name='admin-attendees-list'),

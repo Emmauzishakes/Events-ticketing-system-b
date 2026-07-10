@@ -15,6 +15,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 import dj_database_url
 
+from corsheaders.defaults import default_headers
+
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -121,6 +123,10 @@ DATABASES = {
 CORS_ORIGIN_ALLOW_ALL = False
 CORS_ALLOWED_ORIGINS = os.environ.get('CORS_ALLOWED_ORIGINS', '').split(',') if os.environ.get('CORS_ALLOWED_ORIGINS') else []
 CORS_ALLOW_CREDENTIALS = True
+
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    'x-device-id',
+]
 
 csrf_env = os.environ.get('CSRF_TRUSTED_ORIGINS', '')
 CSRF_TRUSTED_ORIGINS = csrf_env.split(',') if csrf_env else []

@@ -232,7 +232,8 @@ def validate_ticket(request, ticket_id):
     return Response({
         "message": "Access granted",
         "event_name": ticket.event.name,
-        "stream_link": ticket.event.stream_link
+        "stream_link": ticket.event.stream_link,
+        "event_slug": ticket.event.slug
     }, status=status.HTTP_200_OK)
 
 @api_view(['GET'])
@@ -318,3 +319,23 @@ def verify_mpesa_receipt(request):
         }, status=status.HTTP_200_OK)
     except Payment.DoesNotExist:
         return Response({"error": "Invalid details. The receipt and phone number combination was not found."}, status=status.HTTP_404_NOT_FOUND)
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def track_stream_view(request, slug):
+    """
+    Silent endpoint triggered when a viewer successfully connects to the WebRTC stream.
+    Useful for tracking shared links and total shadow viewers.
+    """
+    try:
+        event = Event.objects.get(slug=slug)
+        # Assuming you add a 'total_views' IntegerField to your Event model later
+        # event.total_views += 1 
+        # event.save()
+        
+        # For now, we will just print it to the Django terminal to prove it works
+        print(f"📈 ANALYTICS: New viewer joined '{event.name}'. Device IP: {request.META.get('REMOTE_ADDR')}")
+        
+        return Response({"status": "tracked"}, status=200)
+    except Event.DoesNotExist:
+        return Response({"error": "Event not found"}, status=404)
