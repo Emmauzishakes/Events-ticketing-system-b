@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Event, Ticket, Payment
+from .models import Event, Ticket, Payment, Voucher
 
 # Register your models here.
 @admin.register(Event)
@@ -26,3 +26,5 @@ class PaymentAdmin(admin.ModelAdmin):
     search_fields = ('phone_number', 'mpesa_receipt_number', 'mpesa_checkout_id')
     readonly_fields = ('mpesa_checkout_id', 'mpesa_receipt_number', 'created_at', 'updated_at')
     ordering = ('-created_at',)
+
+admin.site.register(Voucher)

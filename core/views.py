@@ -1,11 +1,13 @@
 import base64
 from os import stat
 import requests
+import math
 from datetime import datetime
+from django.db import transaction
 from django.db.models import Sum, Count
 from django.shortcuts import get_object_or_404
 from django.conf import settings
-from .models import Event, Ticket, Payment
+from .models import Event, Ticket, Payment, Voucher
 from .serializers import EventSerializer, TicketSerializer, PaymentSerializer
 from rest_framework import viewsets, status
 from rest_framework.permissions import BasePermission, SAFE_METHODS, IsAdminUser, AllowAny
@@ -73,27 +75,77 @@ def format_phone_number(phone):
 @api_view(['POST'])
 def initiate_stk_push(request):
     """
-    Frontend sends the Event ID they want to watch, and their phone number.
+    Frontend sends the Event ID they want to watch, their phone number, and an optional voucher.
     """
     event_id = request.data.get('event_id') 
     phone_number = request.data.get('phone_number')
+    voucher_code = request.data.get('voucher_code')
 
-    if not event_id or not phone_number:
-        return Response({'error': 'Event ID and phone number are required.'}, status=status.HTTP_400_BAD_REQUEST)
+    # 1. Only strictly require the Event ID upfront
+    if not event_id:
+        return Response({'error': 'Event ID is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
     event = get_object_or_404(Event, id=event_id)
 
-    # 1. Stop payments if the show is over
     if not event.is_active:
         return Response({'error': 'This live event has ended.'}, status=status.HTTP_400_BAD_REQUEST)
+    
+    # 2. Calculate the final price FIRST
+    final_price = int(event.price)
+    voucher = None
 
-    phone_number = format_phone_number(phone_number)
-    amount = int(event.price)
+    if voucher_code:
+        try:
+            voucher = Voucher.objects.get(code=voucher_code.strip().upper(), event=event, is_active=True)
+            if voucher.has_slots_available:
+                discount_amount = (final_price * voucher.discount_percentage) / 100
+                final_price = max(0, math.ceil(final_price - discount_amount))
+            else:
+                return Response({"error": "This voucher has no remaining slots."}, status=status.HTTP_400_BAD_REQUEST)
+        except Voucher.DoesNotExist:
+            return Response({"error": "Invalid voucher code."}, status=status.HTTP_400_BAD_REQUEST)
 
-    # 2. Create the pending Payment
+    # 3. NOW validate the phone number ONLY if they actually need to pay
+    if final_price > 0:
+        if not phone_number:
+            return Response({'error': 'Event ID and phone number are required.'}, status=status.HTTP_400_BAD_REQUEST)
+        phone_number = format_phone_number(phone_number)
+    else:
+        # Assign a dummy value so the Payment model doesn't crash on null
+        phone_number = "FREE-TICKET"
+
+    # 4. Free Ticket Routing (100% Discount)
+    if final_price == 0:
+        with transaction.atomic():
+            if voucher:
+                # Lock the row to prevent race conditions
+                voucher = Voucher.objects.select_for_update().get(id=voucher.id)
+                voucher.slots_used += 1
+                voucher.save()
+            
+            # Generate the digital access token instantly
+            new_token = Ticket.objects.create(event=event)
+            
+            # Record a successful free payment
+            Payment.objects.create(
+                event=event,
+                amount=0,
+                phone_number=phone_number,
+                mpesa_payment_status='successful',
+                mpesa_receipt_number='FREE-VOUCHER',
+                ticket=new_token
+            )
+            
+        return Response({
+            "message": "Free ticket generated successfully!",
+            "is_free": True,
+            "access_code": new_token.access_code
+        }, status=status.HTTP_201_CREATED)
+
+    # 5. Standard Paid Ticket Routing (M-Pesa STK Push)
     payment = Payment.objects.create(
         event=event,
-        amount=amount,
+        amount=final_price,
         phone_number=phone_number,
         mpesa_payment_status='pending'
     )
@@ -116,7 +168,7 @@ def initiate_stk_push(request):
         "Password": password,
         "Timestamp": timestamp,
         "TransactionType": "CustomerPayBillOnline",
-        "Amount": amount,
+        "Amount": final_price, 
         "PartyA": phone_number,
         "PartyB": shortcode,
         "PhoneNumber": phone_number,
@@ -136,7 +188,8 @@ def initiate_stk_push(request):
             return Response({
                 "message": 'STK Push initiated. Check your phone.',
                 "checkout_request_id": payment.mpesa_checkout_id,
-                "payment_id": payment.id
+                "payment_id": payment.id,
+                "is_free": False
             }, status=status.HTTP_200_OK)
         else:
             payment.mpesa_payment_status = 'failed'
@@ -146,7 +199,6 @@ def initiate_stk_push(request):
         payment.mpesa_payment_status = 'failed'
         payment.save()
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
 
 @api_view(['POST'])
 def mpesa_callback(request):
@@ -202,7 +254,7 @@ def check_payment_status(request, checkout_request_id):
 #     return ip
 
 @api_view(['GET'])
-def validate_ticket(request, ticket_id):
+def validate_ticket(request, access_code):
     """Frontend calls this when a user tries to load the stream page."""
     device_id = request.headers.get('X-Device-ID')
 
@@ -210,10 +262,13 @@ def validate_ticket(request, ticket_id):
         return Response({"error": "Device ID is missing from request."}, status=status.HTTP_400_BAD_REQUEST)
 
     try:
-        ticket = Ticket.objects.get(id=ticket_id)
+        ticket = Ticket.objects.get(access_code=access_code)
     except Ticket.DoesNotExist:
         return Response({"error": "Invalid access token."}, status=status.HTTP_404_NOT_FOUND)
 
+    if not ticket.event.is_active:
+        return Response({"error": "This live event has ended."}, status=status.HTTP_403_FORBIDDEN)
+    
     if not ticket.event.is_active:
         return Response({"error": "This live event has ended."}, status=status.HTTP_403_FORBIDDEN)
     
@@ -232,7 +287,6 @@ def validate_ticket(request, ticket_id):
     return Response({
         "message": "Access granted",
         "event_name": ticket.event.name,
-        "stream_link": ticket.event.stream_link,
         "event_slug": ticket.event.slug
     }, status=status.HTTP_200_OK)
 
@@ -339,3 +393,89 @@ def track_stream_view(request, slug):
         return Response({"status": "tracked"}, status=200)
     except Event.DoesNotExist:
         return Response({"error": "Event not found"}, status=404)
+    
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def apply_voucher(request):
+    event_slug = request.data.get('event_slug')
+    voucher_code = request.data.get('code', '').strip().upper()
+
+    try:
+        event = Event.objects.get(slug=event_slug)
+        voucher = Voucher.objects.get(code=voucher_code, event=event, is_active=True)
+
+        if not voucher.has_slots_available:
+            return Response({"error": "This voucher code is fully exhausted."}, status=status.HTTP_400_BAD_REQUEST)
+        
+        original_price = event.price
+        discount_amount = (original_price * voucher.discount_percentage) / 100
+        final_price = max(0, math.ceil(original_price - discount_amount))
+
+        return Response({
+            "valid": True,
+            "code": voucher.code,
+            "discount_percentage": voucher.discount_percentage,
+            "discount_amount": discount_amount,
+            "final_price": final_price,
+            "is_free": final_price == 0
+        }, status=status.HTTP_200_OK)
+    
+    except Event.DoesNotExist:
+        return Response({"error": "Event not found."}, status=status.HTTP_404_NOT_FOUND)
+    except Voucher.DoesNotExist:
+        return Response({"error": "Invalid or expired voucher code."}, status=status.HTTP_400_BAD_REQUEST)
+    
+@api_view(['GET', 'POST'])
+@permission_classes([IsAdminUser])
+def admin_event_vouchers(request, event_id):
+    """Admin endpoint to list and create vouchers for a specific event."""
+    from .models import Event, Voucher
+    
+    try:
+        event = Event.objects.get(id=event_id)
+    except Event.DoesNotExist:
+        return Response({"error": "Event not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        vouchers = Voucher.objects.filter(event=event).order_by('-created_at')
+        data = [{
+            "id": v.id,
+            "code": v.code,
+            "discount_percentage": v.discount_percentage,
+            "max_slots": v.max_slots,
+            "slots_used": v.slots_used,
+            "is_active": v.is_active,
+            "created_at": v.created_at
+        } for v in vouchers]
+        return Response(data, status=status.HTTP_200_OK)
+
+    elif request.method == 'POST':
+        discount = int(request.data.get('discount_percentage', 0))
+        slots = int(request.data.get('max_slots', 0))
+        custom_code = request.data.get('code', '').strip().upper()
+
+        if discount < 1 or discount > 100:
+            return Response({"error": "Discount must be between 1 and 100%"}, status=status.HTTP_400_BAD_REQUEST)
+        if slots < 1:
+            return Response({"error": "Max slots must be at least 1."}, status=status.HTTP_400_BAD_REQUEST)
+
+        voucher = Voucher(event=event, discount_percentage=discount, max_slots=slots)
+        
+        if custom_code:
+            if Voucher.objects.filter(code=custom_code).exists():
+                return Response({"error": "This specific voucher code is already in use."}, status=status.HTTP_400_BAD_REQUEST)
+            voucher.code = custom_code
+            
+        voucher.save()
+        
+        return Response({
+            "message": "Voucher created successfully", 
+            "voucher": {
+                "id": voucher.id,
+                "code": voucher.code,
+                "discount_percentage": voucher.discount_percentage,
+                "max_slots": voucher.max_slots,
+                "slots_used": voucher.slots_used,
+                "is_active": voucher.is_active
+            }
+        }, status=status.HTTP_201_CREATED)
