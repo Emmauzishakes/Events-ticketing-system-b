@@ -2,18 +2,25 @@ import base64
 from os import stat
 import requests
 import math
+import io
 from datetime import datetime
 from django.db import transaction
 from django.db.models import Sum, Count
 from django.shortcuts import get_object_or_404
+from django.http import FileResponse
 from django.conf import settings
-from .models import Event, Ticket, Payment, Voucher
+from .models import Event, Ticket, Payment, Voucher, generate_viewer_username
 from .serializers import EventSerializer, TicketSerializer, PaymentSerializer
 from rest_framework import viewsets, status
 from rest_framework.permissions import BasePermission, SAFE_METHODS, IsAdminUser, AllowAny
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes, action, throttle_classes
 from rest_framework.throttling import AnonRateThrottle
+
+from reportlab.lib.pagesizes import letter
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 
 # Create your views here.
 
@@ -263,6 +270,9 @@ def validate_ticket(request, access_code):
 
     try:
         ticket = Ticket.objects.get(access_code=access_code)
+        if not ticket.username:
+            ticket.username = generate_viewer_username()
+            ticket.save()
     except Ticket.DoesNotExist:
         return Response({"error": "Invalid access token."}, status=status.HTTP_404_NOT_FOUND)
 
@@ -287,7 +297,8 @@ def validate_ticket(request, access_code):
     return Response({
         "message": "Access granted",
         "event_name": ticket.event.name,
-        "event_slug": ticket.event.slug
+        "event_slug": ticket.event.slug,
+        "username": ticket.username
     }, status=status.HTTP_200_OK)
 
 @api_view(['GET'])
@@ -479,3 +490,74 @@ def admin_event_vouchers(request, event_id):
                 "is_active": voucher.is_active
             }
         }, status=status.HTTP_201_CREATED)
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def export_event_receipt_pdf(request, slug):
+    """Generates secure, printable financial audit statement/receipt for a completed broadcast event."""
+    event = get_object_or_404(Event, slug=slug)
+
+    successful_payments = Payment.objects.filter(event=event, mpesa_payment_status='successful')
+    total_revenue = successful_payments.aggregate(Sum('amount'))['amount__sum'] or 0
+    total_tickets = Ticket.objects.filter(event=event).count()
+
+    # Create an in-memory byte buffer pipeline for the file stream
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40
+    )
+
+    styles = getSampleStyleSheet()
+    story = []
+
+    # Custom Typography Styling Palette
+    title_style = ParagraphStyle(
+        'DocTitle',  parent=styles['Heading1'],
+        fontSize=24, leading=14, textColor=colors.HexColor('#64748B'),
+        spaceAfter=6
+    )
+    meta_style = ParagraphStyle(
+        'DocMeta', parent=styles['Normal'],
+        fontSize=10, leading=14, textColor=colors.HexColor('#64748B'),
+        spaceAfter=20
+    )
+    th_style = ParagraphStyle('TH', fontName='Helvetica-Bold', fontSize=10, leading=12, textColor=colors.HexColor('#FFFFFF'))
+    td_style = ParagraphStyle('TD', fontName='Helvetica', fontSize=9, leading=11, textColor=colors.HexColor('#1E293B'))
+
+    # Document Header Elements
+    story.append(Paragraph("CHIZZI STREAMING PLATFORM", title_style))
+    story.append(Paragraph(f"Official Financial Audit Statement — Performance Record", meta_style))
+    story.append(Spacer(1, 15))
+
+    # Master Breakdown Grid Data
+    summary_data = [
+        [Paragraph("Metric Description", th_style), Paragraph("Value", th_style)],
+        [Paragraph("Event Name / Title", td_style), Paragraph(event.name, td_style)],
+        [Paragraph("Database Reference ID", td_style), Paragraph(str(event.id), td_style)],
+        [Paragraph("Target Base Ticket Cost", td_style), Paragraph(f"KES {event.price}", td_style)],
+        [Paragraph("Total System Passes Generated", td_style), Paragraph(str(total_tickets), td_style)],
+        [Paragraph("Total Gross Volume Handled", td_style), Paragraph(f"KES {total_revenue:,.2f}", fontName='Helvetica-Bold', fontSize=10, textColor=colors.HexColor('#16A34A'))],
+    ]
+
+    summary_table = Table(summary_data, colWidths=[250, 250])
+    summary_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (1,0), colors.HexColor('#0F172A')),
+        ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 8),
+        ('TOPPADDING', (0,0), (-1,-1), 8),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E2E8F0')),
+        ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#F8FAFC')])
+    ]))
+    
+    story.append(summary_table)
+    story.append(Spacer(1, 30))
+
+    # Generate File Document Structure
+    doc.build(story)
+    buffer.seek(0)
+
+    # Return download headers directly to trigger native browser save prompts
+    filename = f"Receipt-{event.slug}.pdf"
+    return FileResponse(buffer, as_attachment=True, filename=filename, content_type='application/pdf')

@@ -3,6 +3,7 @@ from django.utils.text import slugify
 from django.utils.crypto import get_random_string
 import uuid
 import string
+import random
 
 # Create your models here.
 
@@ -31,6 +32,11 @@ def generate_access_code():
     # Generates a 9-character alphanumeric string (A-Z, a-z, 0-9)
     return get_random_string(length=9)
 
+def generate_viewer_username():
+    chars = string.ascii_uppercase + string.digits
+    suffix = ''.join(random.choices(chars, k=4))
+    return f"Viewer_{suffix}"
+
 class Ticket(models.Model):
     """The digital access token generated upon payment."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -38,6 +44,7 @@ class Ticket(models.Model):
     event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name='access_tokens')
     created_at = models.DateTimeField(auto_now_add=True)
     allowed_device_ids = models.JSONField(default=list, blank=True)
+    username = models.CharField(max_length=50, default=generate_viewer_username, blank=True)
 
     def __str__(self):
         return f"Access Token - {self.id}"
