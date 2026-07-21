@@ -20,6 +20,8 @@ urlpatterns = [
     path('track-view/<slug:slug>/', views.track_stream_view, name='track_view'),
 
     path('admin/metrics/', views.admin_dashboard_metrics, name='admin-dashboard-metrics'),
+    path('admin/events/<slug:slug>/metrics/', views.get_event_metrics, name='event-metrics'),
+    path('admin/events/<slug:slug>/receipt/pdf/', views.export_event_receipt_pdf, name='event-receipt-pdf'),
     path('admin/attendees/', views.admin_attendees_list, name='admin-attendees-list'),
     path('admin/events/<int:event_id>/vouchers/', views.admin_event_vouchers, name='admin_vouchers'),
 ]

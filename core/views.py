@@ -7,20 +7,23 @@ from datetime import datetime
 from django.db import transaction
 from django.db.models import Sum, Count
 from django.shortcuts import get_object_or_404
-from django.http import FileResponse
+from django.http import FileResponse, HttpResponse
 from django.conf import settings
 from .models import Event, Ticket, Payment, Voucher, generate_viewer_username
 from .serializers import EventSerializer, TicketSerializer, PaymentSerializer
 from rest_framework import viewsets, status
-from rest_framework.permissions import BasePermission, SAFE_METHODS, IsAdminUser, AllowAny
+from rest_framework.permissions import BasePermission, SAFE_METHODS, IsAdminUser, AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes, action, throttle_classes
 from rest_framework.throttling import AnonRateThrottle
 
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.graphics.shapes import Drawing
+from reportlab.graphics.charts.piecharts import Pie
 
 # Create your views here.
 
@@ -341,6 +344,24 @@ def admin_dashboard_metrics(request):
     }, status=status.HTTP_200_OK)
 
 @api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_event_metrics(request, slug):
+    event = get_object_or_404(Event, slug=slug)
+    total_tickets = Ticket.objects.filter(event=event).count()
+    event_price = getattr(event, 'price', 0)
+    total_revenue = total_tickets * event_price
+    total_views = getattr(event, 'views', 0)
+
+    return Response({
+        "name": event.name,
+        "slug": event.slug,
+        "price": event_price,
+        "total_revenue": total_revenue,
+        "total_tickets": total_tickets,
+        "total_views": total_views,
+    }, status=200)
+
+@api_view(['GET'])
 @permission_classes([IsAdminUser])
 def admin_attendees_list(request):
     """Returns a list of all successful buyers for the Attendees tab."""
@@ -494,70 +515,113 @@ def admin_event_vouchers(request, event_id):
 @api_view(['GET'])
 @permission_classes([IsAdminUser])
 def export_event_receipt_pdf(request, slug):
-    """Generates secure, printable financial audit statement/receipt for a completed broadcast event."""
     event = get_object_or_404(Event, slug=slug)
-
+    
+    # 1. Fetch Metrics
     successful_payments = Payment.objects.filter(event=event, mpesa_payment_status='successful')
-    total_revenue = successful_payments.aggregate(Sum('amount'))['amount__sum'] or 0
-    total_tickets = Ticket.objects.filter(event=event).count()
+    paid_tickets_count = successful_payments.count()
+    target_price = float(getattr(event, 'price', 0))
+    
+    # Voucher Metrics
+    vouchers_generated = Voucher.objects.filter(event=event).count()
+    vouchers_used = Voucher.objects.filter(event=event).aggregate(Sum('slots_used'))['slots_used__sum'] or 0
+    
+    # Total System Passes = Paid Tickets + Used Vouchers
+    total_passes = paid_tickets_count + vouchers_used
+    
+    # 2. Dynamic Fee Calculation
+    # Revenue from direct sales
+    gross_revenue = float(successful_payments.aggregate(Sum('amount'))['amount__sum'] or 0)
+    
+    # Fee applies to actual revenue PLUS the value of vouchers the creator used
+    fee_percentage = float(event.platform_fee_percentage) / 100
+    voucher_cost_basis = vouchers_used * target_price
+    
+    platform_fee = (gross_revenue + voucher_cost_basis) * fee_percentage
+    creator_payout = gross_revenue - platform_fee
 
-    # Create an in-memory byte buffer pipeline for the file stream
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=letter,
-        rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40
-    )
+    # 3. Setup Document
+    response = HttpResponse(content_type='application/pdf')
+    response['Content-Disposition'] = f'attachment; filename="Chizzi_Receipt_{slug}.pdf"'
+    doc = SimpleDocTemplate(response, pagesize=letter, rightMargin=50, leftMargin=50, topMargin=50, bottomMargin=50)
+    elements = []
+    
+    # 4. Styles & Header (FIXED ALIGNMENT OVERLAP)
+    title_style = ParagraphStyle(name='ChizziTitle', fontName='Helvetica-Bold', fontSize=26, textColor=colors.HexColor('#F97316'), alignment=TA_CENTER)
+    subtitle_style = ParagraphStyle(name='Subtitle', fontName='Helvetica', fontSize=11, textColor=colors.HexColor('#64748B'), alignment=TA_CENTER)
 
-    styles = getSampleStyleSheet()
-    story = []
+    elements.append(Paragraph("CHIZZI STUDIO", title_style))
+    elements.append(Spacer(1, 15)) # HARD SPACER: Prevents the overlap
+    elements.append(Paragraph("Official Financial Audit & Performance Record", subtitle_style))
+    elements.append(Spacer(1, 30))
 
-    # Custom Typography Styling Palette
-    title_style = ParagraphStyle(
-        'DocTitle',  parent=styles['Heading1'],
-        fontSize=24, leading=14, textColor=colors.HexColor('#64748B'),
-        spaceAfter=6
-    )
-    meta_style = ParagraphStyle(
-        'DocMeta', parent=styles['Normal'],
-        fontSize=10, leading=14, textColor=colors.HexColor('#64748B'),
-        spaceAfter=20
-    )
-    th_style = ParagraphStyle('TH', fontName='Helvetica-Bold', fontSize=10, leading=12, textColor=colors.HexColor('#FFFFFF'))
-    td_style = ParagraphStyle('TD', fontName='Helvetica', fontSize=9, leading=11, textColor=colors.HexColor('#1E293B'))
-
-    # Document Header Elements
-    story.append(Paragraph("CHIZZI STREAMING PLATFORM", title_style))
-    story.append(Paragraph(f"Official Financial Audit Statement — Performance Record", meta_style))
-    story.append(Spacer(1, 15))
-
-    # Master Breakdown Grid Data
-    summary_data = [
-        [Paragraph("Metric Description", th_style), Paragraph("Value", th_style)],
-        [Paragraph("Event Name / Title", td_style), Paragraph(event.name, td_style)],
-        [Paragraph("Database Reference ID", td_style), Paragraph(str(event.id), td_style)],
-        [Paragraph("Target Base Ticket Cost", td_style), Paragraph(f"KES {event.price}", td_style)],
-        [Paragraph("Total System Passes Generated", td_style), Paragraph(str(total_tickets), td_style)],
-        [Paragraph("Total Gross Volume Handled", td_style), Paragraph(f"KES {total_revenue:,.2f}", fontName='Helvetica-Bold', fontSize=10, textColor=colors.HexColor('#16A34A'))],
+    # 5. Table Data (NOW INCLUDES VOUCHERS)
+    data = [
+        ["METRIC DESCRIPTION", "RECORDED VALUE"],
+        ["Event Name / Title", event.name],
+        ["Target Base Ticket Cost", f"KES {target_price:,.2f}"],
+        ["Vouchers Generated (Creator)", str(vouchers_generated)],
+        ["Vouchers Actually Used", str(vouchers_used)],
+        ["Paid Tickets Generated", str(paid_tickets_count)],
+        ["Gross Paid Volume Handled", f"KES {gross_revenue:,.2f}"],
+        [f"Platform Fee ({event.platform_fee_percentage}%) [Inc. Voucher Costs]", f"- KES {platform_fee:,.2f}"],
+        ["NET CREATOR PAYOUT", f"KES {creator_payout:,.2f}"]
     ]
 
-    summary_table = Table(summary_data, colWidths=[250, 250])
-    summary_table.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (1,0), colors.HexColor('#0F172A')),
-        ('ALIGN', (0,0), (-1,-1), 'LEFT'),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 8),
-        ('TOPPADDING', (0,0), (-1,-1), 8),
-        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E2E8F0')),
-        ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#F8FAFC')])
+    table = Table(data, colWidths=[300, 180])
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#0F172A')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 12), ('TOPPADDING', (0, 0), (-1, 0), 12),
+        
+        ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#F8FAFC')),
+        ('TEXTCOLOR', (0, 1), (0, -1), colors.HexColor('#475569')),
+        ('TEXTCOLOR', (1, 1), (1, -1), colors.HexColor('#0F172A')),
+        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+        ('BOTTOMPADDING', (0, 1), (-1, -1), 10), ('TOPPADDING', (0, 1), (-1, -1), 10),
+        ('GRID', (0, 0), (-1, -1), 1, colors.HexColor('#E2E8F0')),
+        
+        ('TEXTCOLOR', (1, -2), (1, -2), colors.HexColor('#EF4444')), # Red Fee
+        ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+        ('BACKGROUND', (0, -1), (-1, -1), colors.HexColor('#F1F5F9')),
+        ('TEXTCOLOR', (1, -1), (1, -1), colors.HexColor('#10B981')), # Green Payout
     ]))
-    
-    story.append(summary_table)
-    story.append(Spacer(1, 30))
+    elements.append(table)
+    elements.append(Spacer(1, 40))
 
-    # Generate File Document Structure
-    doc.build(story)
-    buffer.seek(0)
+    # 6. Pie Chart (FIXED TO SHOW EVEN IF 0)
+    drawing = Drawing(400, 200)
+    pie = Pie()
+    pie.x = 125
+    pie.y = 25
+    pie.width = 150
+    pie.height = 150
+    pie.slices.strokeWidth = 1
+    pie.slices.strokeColor = colors.white
 
-    # Return download headers directly to trigger native browser save prompts
-    filename = f"Receipt-{event.slug}.pdf"
-    return FileResponse(buffer, as_attachment=True, filename=filename, content_type='application/pdf')
+    if (creator_payout > 0 or platform_fee > 0):
+        # Draw Real Data
+        pie.data = [creator_payout, platform_fee]
+        pie.labels = ['Creator Payout', 'Platform Fee']
+        pie.slices[0].fillColor = colors.HexColor('#10B981') # Emerald
+        pie.slices[1].fillColor = colors.HexColor('#F97316') # Orange
+    else:
+        # Draw Empty Fallback Chart when KES is 0.00
+        pie.data = [100] 
+        pie.labels = ['No Revenue Yet']
+        pie.slices[0].fillColor = colors.HexColor('#E2E8F0') # Gray
+
+    drawing.add(pie)
+    elements.append(Paragraph("Revenue Split Visualization", subtitle_style))
+    elements.append(Spacer(1, 10))
+    elements.append(drawing)
+    elements.append(Spacer(1, 30))
+
+    # 7. Footer
+    footer_style = ParagraphStyle(name='Footer', fontSize=9, textColor=colors.HexColor('#94A3B8'), alignment=TA_CENTER)
+    elements.append(Paragraph("This document is securely generated by the Chizzi Engine.", footer_style))
+    elements.append(Paragraph("* Future KRA e-TIMS fiscal compliance will be attached.", footer_style))
+
+    doc.build(elements)
+    return response

@@ -13,6 +13,7 @@ class Event(models.Model):
     date = models.DateTimeField()
     slug = models.SlugField(max_length=255, unique=True, null=True, blank=True)
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    platform_fee_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
     # stream_link = models.URLField(blank=True, null=True, help_text="The hidden Live or stream URL")
     is_approved = models.BooleanField(default=False, help_text="Designates whether this event is visible to the public.")
 
