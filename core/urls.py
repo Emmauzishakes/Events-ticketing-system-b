@@ -8,6 +8,8 @@ router.register(r'events', views.EventViewSet)
 
 
 urlpatterns = [
+    path('events/public/', views.public_events_list, name="public-events"),
+
     path('', include(router.urls)),
 
     path('pay/', views.initiate_stk_push, name='initiate-stk-push'),

@@ -3,12 +3,13 @@ from os import stat
 import requests
 import math
 import io
-from datetime import datetime
+from datetime import datetime, timedelta
 from django.db import transaction
-from django.db.models import Sum, Count
+from django.db.models import Sum, Count,Q
 from django.shortcuts import get_object_or_404
 from django.http import FileResponse, HttpResponse
 from django.conf import settings
+from django.utils import timezone
 from .models import Event, Ticket, Payment, Voucher, generate_viewer_username
 from .serializers import EventSerializer, TicketSerializer, PaymentSerializer
 from rest_framework import viewsets, status
@@ -47,8 +48,23 @@ class EventViewSet(viewsets.ModelViewSet):
         """Dedicated, secure endpoint to terminate an event."""
         event = self.get_object()
         event.is_active = False
+        event.ended_at = timezone.now()
         event.save()
         return Response({"message": f"Broadcast ended successfully."}, status=status.HTTP_200_OK)
+    
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def public_events_list(request):
+    """Serves events to the default viewers frontend page."""
+    now = timezone.now()
+    cutoff_time = now - timedelta(hours=72)
+    public_events = Event.objects.filter(
+        Q(is_active=True) | 
+        Q(is_active=False, ended_at__gte=cutoff_time)
+    ).order_by('-created_at')
+
+    serializer = EventSerializer(public_events, many=True)
+    return Response(serializer.data)
 
 class TicketViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Ticket.objects.all()
@@ -250,7 +266,7 @@ def check_payment_status(request, checkout_request_id):
     response_data = { "status": payment.mpesa_payment_status }
 
     if payment.mpesa_payment_status == 'successful' and payment.ticket:
-        response_data['ticket_id'] = str(payment.ticket.id)
+        response_data['ticket_id'] = str(payment.ticket.access_code)
 
     return Response(response_data, status=status.HTTP_200_OK)
 
@@ -282,8 +298,8 @@ def validate_ticket(request, access_code):
     if not ticket.event.is_active:
         return Response({"error": "This live event has ended."}, status=status.HTTP_403_FORBIDDEN)
     
-    if not ticket.event.is_active:
-        return Response({"error": "This live event has ended."}, status=status.HTTP_403_FORBIDDEN)
+    # if not ticket.event.is_active:
+    #     return Response({"error": "This live event has ended."}, status=status.HTTP_403_FORBIDDEN)
     
     MAX_DEVICES = 2
     # client_ip = get_client_ip(request)
