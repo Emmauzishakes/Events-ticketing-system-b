@@ -153,16 +153,23 @@ def admin_login(request):
     return Response({"error": "Invalid credentials"}, status=status.HTTP_401_UNAUTHORIZED)
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def check_auth_status(request):
-    """Verifies the session cookie and ensures the user is still an admin."""
-    if not request.user.is_staff:
-        return Response({"authenticated": False}, status=status.HTTP_401_UNAUTHORIZED)
+    """Verifies session cookies and checks if the current user is an authenticated admin."""
+    if request.user.is_authenticated and request.user.is_staff:
 
+    # if not request.user.is_staff:
+    #     return Response({"authenticated": False}, status=status.HTTP_401_UNAUTHORIZED)
+
+        return Response({
+            "authenticated": True,
+            "username": request.user.username,
+            "is_admin": True
+        }, status=status.HTTP_200_OK)
+    
     return Response({
-        "authenticated": True,
-        "username": request.user.username,
-        "is_admin": True
+        "authenticated": False,
+        "is_admin": False
     }, status=status.HTTP_200_OK)
 
 @api_view(['POST'])
