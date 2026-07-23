@@ -416,7 +416,7 @@ def verify_mpesa_receipt(request):
             )
         return Response({
             "message": "Ticket retrieved successfully",
-            "ticket_id": str(payment.ticket.id),
+            "ticket_id": str(payment.ticket.access_code),
             "event_name": payment.event.name
         }, status=status.HTTP_200_OK)
     except Payment.DoesNotExist:
